@@ -5,6 +5,7 @@ import { Run } from '../runs/run.entity';
 import { Step } from '../steps/step.entity';
 import { TOOLS } from '../tools/tools';
 import { RunStateRepository } from './run-state.repository';
+import { maybeCrash } from './chaos';
 
 function pendingToolCalls(messages: Message[]): ToolCallRequest[] {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -75,13 +76,13 @@ export class AgentService {
         tokensOut: resp.tokensOut,
         latencyMs: Date.now() - started,
       });
-    //   this.maybeCrash(stepIndex, attempt); only for dev test
+      maybeCrash('llm_saved', stepIndex, attempt);
       messages.push({ role: 'assistant', content: resp.text, toolCalls: resp.toolCalls });
       stepIndex++;
     }
   }
 
-  private async runToolOnce(runId: string, attempt: number, stepIndex: number, call: ToolCallRequest): Promise<string> {
+    private async runToolOnce(runId: string, attempt: number, stepIndex: number, call: ToolCallRequest): Promise<string> {
     // Stable across attempts: built from ids, not from args (jsonb may reorder keys).
     const key = `${runId}:${stepIndex}:${call.id}`;
     const started = Date.now();
@@ -90,25 +91,31 @@ export class AgentService {
     const existing = created ? null : await this.state.getToolCall(key);
 
     let content: string;
-    if (existing?.status === 'done') {
+    if (existing?.status === 'done' && existing.result) {
       // A previous attempt already ran this tool; reuse its result, don't run it again.
-      content = (existing.result as { content: string }).content;
+      content = existing.result.content;
     } else {
       // Fresh, or a previous attempt died mid-execution (outcome unknown).
-      // Run it, passing the key so the tool can dedupe downstream.
+      // Run it, passing the key so the side effect can dedupe downstream.
       let out: unknown;
       try {
         const tool = TOOLS.find((t) => t.spec.name === call.name);
         if (!tool) throw new Error(`unknown tool: ${call.name}`);
-        out = { ok: true, result: await tool.execute(call.args, { idempotencyKey: key }) };
+        const result = await tool.execute(call.args, {
+          idempotencyKey: key,
+          runId,
+          recordEffect: (label) => this.state.recordEffect(key, runId, label),
+        });
+        out = { ok: true, result };
       } catch (e) {
         out = { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
+      maybeCrash('tool_executed', stepIndex, attempt); // effect done, result not yet saved
       content = JSON.stringify(out);
       await this.state.finishToolCall(key, { content });
     }
 
-    // Stored as a string so a replayed run sees exactly the same text (jsonb reorders object keys).
+    // Stored as a string so a replayed run sees exactly the same text.
     await this.state.saveStep(runId, attempt, {
       stepIndex,
       kind: 'tool_call',
@@ -116,7 +123,7 @@ export class AgentService {
       response: { content },
       latencyMs: Date.now() - started,
     });
-    // this.maybeCrash(stepIndex, attempt);
+    maybeCrash('tool_saved', stepIndex, attempt);
     return content;
   }
 

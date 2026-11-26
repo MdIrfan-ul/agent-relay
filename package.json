@@ -22,7 +22,8 @@
     "migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/db/data-source.ts",
     "migration:run": "typeorm-ts-node-commonjs migration:run -d src/db/data-source.ts",
     "start:worker": "nest start --entryFile worker",
-    "start:worker:dev": "nest start --watch --entryFile worker"
+    "start:worker:dev": "nest start --watch --entryFile worker",
+    "chaos": "nest build && ts-node test/chaos/run-chaos.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1177.0",

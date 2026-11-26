@@ -10,6 +10,7 @@ import { AGENT_RUNS_QUEUE } from './queue/queue.constants';
 import { Run } from './runs/run.entity';
 import { Step } from './steps/step.entity';
 import { ToolCall } from './tools/tool-call.entity';
+import { Effect } from './tools/effect.entity';
 import { AgentRunProcessor } from './worker/agent-run.processor';
 import { ConfigService } from '@nestjs/config';
 import { OpenAiCompatLlmClient } from './llm/openai-compat-llm.client';
@@ -17,7 +18,7 @@ import type { LlmClient } from './llm/llm.types';
 @Module({
   imports: [
     InfraModule,
-    TypeOrmModule.forFeature([Run, Step, ToolCall]),
+    TypeOrmModule.forFeature([Run, Step, ToolCall,Effect]),
     BullModule.registerQueue({ name: AGENT_RUNS_QUEUE }),
   ],
   providers: [

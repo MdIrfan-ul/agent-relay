@@ -2,6 +2,9 @@ import type { ToolSpec } from '../llm/llm.types';
 
 export interface ToolContext {
   idempotencyKey: string;
+  runId: string;
+  /** Performs the side effect, deduplicated downstream by the idempotency key. */
+  recordEffect(label: string): Promise<void>;
 }
 
 export interface Tool {
@@ -47,5 +50,21 @@ const calculator: Tool = {
     }
   },
 };
+const recordEvent: Tool = {
+  spec: {
+    name: 'record_event',
+    description: 'Records an event with a label. This is a real side effect.',
+    inputSchema: {
+      type: 'object',
+      properties: { label: { type: 'string' } },
+      required: ['label'],
+    },
+  },
+  execute: async (args, ctx) => {
+    const label = typeof args.label === 'string' ? args.label : 'event';
+    await ctx.recordEffect(label);
+    return { recorded: true, label };
+  },
+};
 
-export const TOOLS: Tool[] = [getTime, calculator];
+export const TOOLS: Tool[] = [getTime, calculator,recordEvent];

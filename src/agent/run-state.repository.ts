@@ -105,4 +105,12 @@ export class RunStateRepository {
   async finishToolCall(key: string, result: ToolResultPayload) {
     await this.ds.getRepository(ToolCall).update({ idempotencyKey: key }, { status: 'done', result  });
   }
+    /** The side effect. One row per key; a re-run after a crash bumps `executions` instead of adding a row. */
+  async recordEffect(key: string, runId: string, label: string): Promise<void> {
+    await this.ds.query(
+      `INSERT INTO effects (idempotency_key, run_id, label) VALUES ($1, $2::uuid, $3)
+       ON CONFLICT (idempotency_key) DO UPDATE SET executions = effects.executions + 1`,
+      [key, runId, label],
+    );
+  }
 }
