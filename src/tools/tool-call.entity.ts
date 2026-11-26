@@ -1,6 +1,9 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryColumn } from 'typeorm';
 
 export type ToolCallStatus = 'started' | 'done' | 'failed';
+export interface ToolResultPayload {
+  content: string;
+}
 
 @Entity('tool_calls')
 export class ToolCall {
@@ -18,7 +21,7 @@ export class ToolCall {
   args: unknown;
 
   @Column({ type: 'jsonb', nullable: true })
-  result: unknown;
+  result: ToolResultPayload | null;
 
   @Column({ type: 'text' })
   status: ToolCallStatus;
