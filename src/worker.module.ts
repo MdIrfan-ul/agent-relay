@@ -11,7 +11,9 @@ import { Run } from './runs/run.entity';
 import { Step } from './steps/step.entity';
 import { ToolCall } from './tools/tool-call.entity';
 import { AgentRunProcessor } from './worker/agent-run.processor';
-
+import { ConfigService } from '@nestjs/config';
+import { OpenAiCompatLlmClient } from './llm/openai-compat-llm.client';
+import type { LlmClient } from './llm/llm.types';
 @Module({
   imports: [
     InfraModule,
@@ -22,7 +24,18 @@ import { AgentRunProcessor } from './worker/agent-run.processor';
     AgentRunProcessor,
     AgentService,
     RunStateRepository,
-    { provide: LLM_CLIENT, useClass: ScriptedLlmClient }, // Step 4 swaps this for a real model
+    {
+      provide: LLM_CLIENT,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService): LlmClient =>
+        config.get<string>('LLM_PROVIDER', 'scripted') === 'openai-compat'
+          ? new OpenAiCompatLlmClient({
+              baseUrl: config.getOrThrow<string>('LLM_BASE_URL'),
+              model: config.getOrThrow<string>('LLM_MODEL'),
+              apiKey: config.get<string>('LLM_API_KEY') || undefined,
+            })
+          : new ScriptedLlmClient(),
+    }, 
   ],
 })
 export class WorkerModule {}
