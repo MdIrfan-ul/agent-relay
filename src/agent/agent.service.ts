@@ -75,6 +75,7 @@ export class AgentService {
         tokensOut: resp.tokensOut,
         latencyMs: Date.now() - started,
       });
+    //   this.maybeCrash(stepIndex, attempt); only for dev test
       messages.push({ role: 'assistant', content: resp.text, toolCalls: resp.toolCalls });
       stepIndex++;
     }
@@ -115,6 +116,7 @@ export class AgentService {
       response: { content },
       latencyMs: Date.now() - started,
     });
+    // this.maybeCrash(stepIndex, attempt);
     return content;
   }
 
@@ -138,4 +140,12 @@ export class AgentService {
     }
     return messages;
   }
+//     /** Test hook: simulates a hard crash right after a step is saved. Fires only on the first attempt. */
+//   private maybeCrash(stepIndex: number, attempt: number): void {
+//     const target = process.env.CHAOS_KILL_AFTER_STEP;
+//     if (target !== undefined && target !== '' && attempt === 1 && stepIndex === Number(target)) {
+//       this.logger.error(`CHAOS: killing worker after step ${stepIndex}`);
+//       process.kill(process.pid, 'SIGKILL'); // abrupt: no graceful shutdown, no lock release
+//     }
+//   }
 }
