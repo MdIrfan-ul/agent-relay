@@ -4,9 +4,9 @@ Crash-proof runtime for AI agents.
 
 AI agents run multi-step tasks that can take minutes. If a worker crashes
 halfway, most systems lose the work or repeat actions (like sending an email
-twice). agent-relay checkpoints every step, so another worker resumes exactly
-where the last one stopped, and a finished step is never paid for or executed
-twice.
+twice). agent-relay checkpoints every step, so another worker resumes from the
+last saved step. Only the step that was in flight is repeated, and side effects
+are protected by idempotency keys, so they are applied once.
 
 ## Features
 
@@ -18,6 +18,7 @@ twice.
 - **Limits**: per-run max steps and token budget
 - **Provider-agnostic LLM layer**: a deterministic scripted client for tests, and any
   OpenAI-compatible API (Groq, Ollama, and others) for real models
+- **Chaos-tested**: automated suite kills workers at random and verifies invariants in SQL.
 
 ## Stack
 
@@ -59,7 +60,17 @@ curl -X POST http://localhost:3000/runs \
 
 curl http://localhost:3000/runs/<id>
 ```
+### Run the chaos suite
 
+Keep the API running (`npm run start:dev`), stop any other workers, then:
+
+```bash
+npm run chaos
+```
+
+Optional knobs: `CHAOS_RUNS`, `CHAOS_WORKERS`, `CHAOS_CRASH_RATE`, `CHAOS_KILL_INTERVAL_MS`,
+`CHAOS_TIMEOUT_MS`. To run the control experiment, use
+`CHAOS_NAIVE_EFFECTS=1 npm run chaos` (on the command line, not in `.env`).
 ## Configuration
 
 | Variable | Purpose |
@@ -112,9 +123,55 @@ Result of this test with the scripted LLM:
 - [ ] Retries and dead-letter handling (implemented, not yet tested)
 - [ ] Cancel endpoint, reconciler, resource locks
 - [ ] Observability: per-run trace, cost tracking
-- [ ] Automated chaos test suite (random worker kills, verify exactly-once)
+- [x] Automated chaos test suite (random worker kills, verify exactly-once)
 - [ ] Demo agent with a side-effecting tool, and deployment
 
 ## Chaos test results
 
-_To be added after the automated suite is built._
+`npm run chaos` starts 3 worker processes under a supervisor that restarts any worker
+that dies, submits runs through the real API, and kills workers while they run:
+
+- random in-process SIGKILLs at three points: after an LLM step is saved, after a tool has
+  executed but before its result is saved, and after a tool step is saved
+  (8% per point, on the first three attempts of each run)
+- an external SIGKILL of a random worker every 15 seconds
+
+Every run has 7 steps and 3 tool calls, one of them a side-effecting tool. When all runs
+finish, the suite checks invariants directly in Postgres. It uses the scripted LLM, so the
+test is deterministic and free.
+
+| | 200 runs | 30 runs |
+|---|---|---|
+| Worker deaths | 177 (15 external SIGKILLs) | 25 (3 external) |
+| Runs resumed after a crash | 158 | 24 |
+| Max attempts on one run | 6 | 4 |
+| Runs succeeded | 200 / 200 | 30 / 30 |
+| Runs with a wrong step history | 0 | 0 |
+| Runs with a token-accounting mismatch | 0 | 0 |
+| Runs with a wrong side-effect count | 0 | 0 |
+| Tool re-executions absorbed by the idempotency key | 10 | 8 |
+
+**What this shows:** side effects happen exactly once, while tool executions are
+at-least-once. On 10 occasions a worker died after a tool ran but before its call was
+marked done, so the tool ran again after the crash. The idempotency key kept each effect
+from being written twice.
+
+### Control experiment
+
+With `CHAOS_NAIVE_EFFECTS=1` the tool ignores the idempotency key, like a tool with no
+downstream deduplication. Everything else is identical, and only the side-effect check fails:
+
+| | 200 runs | 30 runs |
+|---|---|---|
+| Worker deaths | 160 | 24 |
+| Runs with duplicate side effects | 30 (15%) | 3 (10%) |
+
+So the suite can fail, and the idempotency key is what makes the difference.
+
+### What the suite does not cover
+
+- It uses a scripted LLM, not a real model.
+- It kills processes outright. It never pauses a worker so its lock expires and then wakes it up (a "zombie" worker), so the fencing check, which only matters when a stale worker keeps writing, is implemented but not yet tested.
+- Redis and Postgres never restart or fail over.
+- In-process crashes stop after the third attempt of a run; external kills are not capped.
+- It runs on one machine at a scale of hundreds of runs. It's evidence, not proof.
