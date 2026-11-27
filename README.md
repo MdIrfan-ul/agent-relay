@@ -6,7 +6,7 @@ AI agents run multi-step tasks that can take minutes. If a worker crashes
 halfway, most systems lose the work or repeat actions (like sending an email
 twice). agent-relay checkpoints every step, so another worker resumes from the
 last saved step. Only the step that was in flight is repeated, and side effects
-are protected by idempotency keys, so they are applied once.
+are applied once as long as tools honor the idempotency key.
 
 ## Features
 
@@ -18,7 +18,11 @@ are protected by idempotency keys, so they are applied once.
 - **Limits**: per-run max steps and token budget
 - **Provider-agnostic LLM layer**: a deterministic scripted client for tests, and any
   OpenAI-compatible API (Groq, Ollama, and others) for real models
-- **Chaos-tested**: automated suite kills workers at random and verifies invariants in SQL.
+- **Chaos-tested**: an automated suite kills workers at random and verifies invariants in SQL
+
+**Results at a glance:** in a 200-run chaos test with 177 worker deaths, all 200 runs completed
+with zero duplicate side effects and exact token accounting. A control run without idempotency
+keys duplicated side effects in 15% of runs under the same conditions.
 
 ## Stack
 
@@ -30,7 +34,9 @@ NestJS · TypeScript · BullMQ (Redis) · PostgreSQL · TypeORM
 2. A worker takes the job and bumps the run's `attempt` counter (the fencing token).
 3. The agent loop rebuilds its message history from the `steps` table, then repeats:
    ask the LLM, save the answer as a step, run any requested tools, save each result.
-4. Every progress write is conditional on the fencing token and runs in a transaction.
+4. Step saves and the run's final state are conditional on the fencing token, and each step
+   is saved together with its token count in one transaction. Tool-call records use
+   "first stored result wins" instead.
 5. If a worker dies, BullMQ detects the stalled job, another worker takes it, and the
    loop continues from the last saved step.
 
@@ -60,6 +66,10 @@ curl -X POST http://localhost:3000/runs \
 
 curl http://localhost:3000/runs/<id>
 ```
+
+With the default scripted LLM the task text is ignored. Set `LLM_PROVIDER=openai-compat`
+(see Configuration) to use a real model.
+
 ### Run the chaos suite
 
 Keep the API running (`npm run start:dev`), stop any other workers, then:
@@ -69,8 +79,10 @@ npm run chaos
 ```
 
 Optional knobs: `CHAOS_RUNS`, `CHAOS_WORKERS`, `CHAOS_CRASH_RATE`, `CHAOS_KILL_INTERVAL_MS`,
-`CHAOS_TIMEOUT_MS`. To run the control experiment, use
-`CHAOS_NAIVE_EFFECTS=1 npm run chaos` (on the command line, not in `.env`).
+`CHAOS_TIMEOUT_MS`, `CHAOS_FREEZE_RATE`. Put them on the command line, not in `.env`, so
+a leftover setting can't silently change a run. The two control experiments are described
+below.
+
 ## Configuration
 
 | Variable | Purpose |
@@ -79,7 +91,12 @@ Optional knobs: `CHAOS_RUNS`, `CHAOS_WORKERS`, `CHAOS_CRASH_RATE`, `CHAOS_KILL_I
 | `REDIS_HOST`, `REDIS_PORT` | Redis for BullMQ |
 | `LLM_PROVIDER` | `scripted` (default, no network) or `openai-compat` |
 | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | Used when `LLM_PROVIDER=openai-compat` |
-| `CHAOS_KILL_AFTER_STEP` | Test hook: the worker kills itself after saving this step |
+| `SCRIPTED_LLM_DELAY_MS` | Latency of each scripted LLM call (default 500) |
+| `CHAOS_KILL_AFTER_STEP` | Test hook: the worker kills itself after saving this step on its first attempt |
+| `CHAOS_CRASH_RATE`, `CHAOS_MAX_CRASH_ATTEMPTS` | Random crash chance per point, and the last attempt on which crashes can occur (default 3) |
+| `CHAOS_FREEZE_RATE`, `CHAOS_FREEZE_MS` | Zombie mode: chance that a first attempt freezes, and for how long (ms) |
+| `CHAOS_NAIVE_EFFECTS` | Control experiment only: the tool ignores its idempotency key (command line only) |
+| `CHAOS_DISABLE_FENCING` | Control experiment only: removes the ownership check (command line only) |
 
 ## Crash-recovery demo
 
@@ -101,12 +118,16 @@ Result of this test with the scripted LLM:
 
 - **At-least-once delivery plus idempotency**: BullMQ may deliver a job again. Saved steps
   and stored tool results make the repeat harmless.
-- **Fencing token**: `runs.attempt` is bumped at the start of each attempt, and every write
-  checks it, so a slow worker that lost its job can't corrupt state.
+- **Fencing token**: `runs.attempt` is bumped at the start of each attempt. Step saves and the
+  final run state check it, so a slow worker that lost its job can't write over the new owner.
 - **Stable tool-call keys**: built from run id, step index, and call id, not from the
   arguments, because JSON column storage can reorder object keys.
+- **First stored tool result wins**: if two attempts both execute a tool, the result stored first
+  is the one every later attempt uses.
 - **History-derived test LLM**: the scripted client decides from the message history,
   not from in-memory state, so it behaves the same after a resume.
+- **Redis persistence**: Redis runs with AOF enabled (see `docker-compose.yml`). Without
+  persistence, a Redis restart would lose queued jobs.
 
 ## Known limitations
 
@@ -114,17 +135,21 @@ Result of this test with the scripted LLM:
   Tools that touch the outside world should pass the idempotency key downstream.
 - If the API crashes between the database insert and the enqueue, the run stays `queued`.
   A reconciler for this is on the roadmap.
+- Tokens for an LLM call whose answer was lost in a crash are not counted, so `tokens_used`
+  can undercount real spend.
+- A stale worker that was taken over may still spend LLM tokens before its writes are rejected.
 
 ## Roadmap
 
 - [x] Agent loop with a provider-agnostic LLM layer
 - [x] Step checkpointing and resume after crash
 - [x] Idempotent tool calls and fenced writes
+- [x] Automated chaos test suite (random worker kills, verify exactly-once side effects)
+- [x] Zombie-worker test (event-loop freeze past lock expiry), with a fencing-disabled control
 - [ ] Retries and dead-letter handling (implemented, not yet tested)
 - [ ] Cancel endpoint, reconciler, resource locks
 - [ ] Observability: per-run trace, cost tracking
-- [x] Automated chaos test suite (random worker kills, verify exactly-once)
-- [ ] Demo agent with a side-effecting tool, and deployment
+- [ ] Demo agent using a real model, and deployment
 
 ## Chaos test results
 
@@ -156,7 +181,7 @@ at-least-once. On 10 occasions a worker died after a tool ran but before its cal
 marked done, so the tool ran again after the crash. The idempotency key kept each effect
 from being written twice.
 
-### Control experiment
+### Control experiment: no idempotency key
 
 With `CHAOS_NAIVE_EFFECTS=1` the tool ignores the idempotency key, like a tool with no
 downstream deduplication. Everything else is identical, and only the side-effect check fails:
@@ -168,10 +193,44 @@ downstream deduplication. Everything else is identical, and only the side-effect
 
 So the suite can fail, and the idempotency key is what makes the difference.
 
+### Zombie workers and fencing
+
+`CHAOS_FREEZE_RATE=0.1` makes a worker block its entire event loop (`Atomics.wait`, 25 seconds by
+default) at a random point on a run's first attempt. BullMQ can't renew the job lock, so the lock
+expires and another worker takes the run. When the frozen worker wakes up, it still believes it
+owns the run and keeps writing. A takeover can also cause a tool re-execution, which the
+idempotency key absorbs the same way.
+
+```bash
+CHAOS_RUNS=20 CHAOS_FREEZE_RATE=0.1 CHAOS_CRASH_RATE=0 CHAOS_KILL_INTERVAL_MS=0 npm run chaos
+```
+
+Control: the same command with `CHAOS_DISABLE_FENCING=1` removes the ownership check.
+
+| | Fencing on | Fencing disabled (control) |
+|---|---|---|
+| Runs | 20 | 20 |
+| Workers frozen / resumed | 13 / 13 | 11 / 11 |
+| Runs taken over by another worker (attempt > 1) | 6 | 8 |
+| Stale writes rejected by the fencing check | 6 (on 6 distinct runs) | 0 |
+| Runs succeeded | 20 / 20 | 20 / 20 |
+| Runs with a token-accounting mismatch | 0 | 8 |
+| Step history, tool calls, side effects | all correct | all correct |
+
+**What this shows:** without fencing, a woken zombie double-counted tokens on 8 runs, the same
+number as runs taken over. With fencing, its writes were rejected and accounting stayed exact.
+Step history and side effects stayed correct either way, because the unique constraint on
+`(run_id, step_index)` and the idempotency key protect them independently (defense in depth).
+
+Small sample (20 runs per mode). The scripted LLM is deterministic, so a zombie's duplicate
+step is identical to the real one. A zombie writing a *different* step, as a real model could,
+is not tested.
+
 ### What the suite does not cover
 
 - It uses a scripted LLM, not a real model.
-- It kills processes outright. It never pauses a worker so its lock expires and then wakes it up (a "zombie" worker), so the fencing check, which only matters when a stale worker keeps writing, is implemented but not yet tested.
+- The zombie test uses 20 runs per mode and a deterministic LLM, so it can't show a stale worker
+  forking a run's history with different content.
 - Redis and Postgres never restart or fail over.
 - In-process crashes stop after the third attempt of a run; external kills are not capped.
 - It runs on one machine at a scale of hundreds of runs. It's evidence, not proof.
