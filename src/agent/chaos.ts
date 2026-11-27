@@ -38,3 +38,10 @@ export function maybeFreeze(point: FreezePoint, stepIndex: number, attempt: numb
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   console.error(`CHAOS: resumed after freeze at ${point} (step ${stepIndex})`);
 }
+
+export function maybeCrashApiAfterInsert(): void {
+  if (process.env.CHAOS_API_CRASH_AFTER_INSERT === '1') {
+    console.error('CHAOS: killing API after insert, before enqueue');
+    process.kill(process.pid, 'SIGKILL');
+  }
+}

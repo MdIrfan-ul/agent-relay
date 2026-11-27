@@ -1,9 +1,10 @@
-// src/runs/runs.service.ts
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Queue } from 'bullmq';
 import { Repository } from 'typeorm';
+import { maybeCrashApiAfterInsert } from '../agent/chaos';
+import { enqueueRun } from '../queue/enqueue';
 import { AGENT_RUNS_QUEUE } from '../queue/queue.constants';
 import { CreateRunDto } from './dto/create-run.dto';
 import { Run } from './run.entity';
@@ -37,14 +38,10 @@ export class RunsService {
       ? await this.runs.findOneByOrFail({ id: newId })
       : await this.runs.findOneByOrFail({ idempotencyKey: idempotencyKey as string });
 
+    maybeCrashApiAfterInsert(); // test hook: the run exists but has no job yet
+
     // jobId = run id, so adding the same run twice is a no-op in BullMQ
-    if (run.status === 'queued') {
-      await this.queue.add(
-        'execute-run',
-        { runId: run.id },
-        { jobId: run.id, attempts: 3, backoff: { type: 'exponential', delay: 2000 } },
-      );
-    }
+    if (run.status === 'queued') await enqueueRun(this.queue, run.id);
     return { id: run.id, status: run.status };
   }
 
@@ -52,5 +49,22 @@ export class RunsService {
     const run = await this.runs.findOneBy({ id });
     if (!run) throw new NotFoundException('run not found');
     return run;
+  }
+
+  /** Cooperative cancel: flips the status now; a running worker stops at its next loop iteration. */
+  async cancel(id: string) {
+    const rows: { id: string }[] = await this.runs.query(
+      `WITH u AS (
+         UPDATE runs SET status = 'cancelled', updated_at = now()
+         WHERE id = $1::uuid AND status IN ('queued', 'running')
+         RETURNING id
+       )
+       SELECT id FROM u`,
+      [id],
+    );
+    const run = await this.runs.findOneBy({ id });
+    if (!run) throw new NotFoundException('run not found');
+    if (rows.length === 0) throw new ConflictException(`run is already ${run.status}`);
+    return { id: run.id, status: run.status };
   }
 }

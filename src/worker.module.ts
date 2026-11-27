@@ -15,28 +15,30 @@ import { AgentRunProcessor } from './worker/agent-run.processor';
 import { ConfigService } from '@nestjs/config';
 import { OpenAiCompatLlmClient } from './llm/openai-compat-llm.client';
 import type { LlmClient } from './llm/llm.types';
+import { ReconcilerService } from './reconciler/reconciler.service';
 @Module({
   imports: [
     InfraModule,
-    TypeOrmModule.forFeature([Run, Step, ToolCall,Effect]),
+    TypeOrmModule.forFeature([Run, Step, ToolCall, Effect]),
     BullModule.registerQueue({ name: AGENT_RUNS_QUEUE }),
   ],
   providers: [
     AgentRunProcessor,
     AgentService,
     RunStateRepository,
+    ReconcilerService,
     {
       provide: LLM_CLIENT,
       inject: [ConfigService],
       useFactory: (config: ConfigService): LlmClient =>
         config.get<string>('LLM_PROVIDER', 'scripted') === 'openai-compat'
           ? new OpenAiCompatLlmClient({
-              baseUrl: config.getOrThrow<string>('LLM_BASE_URL'),
-              model: config.getOrThrow<string>('LLM_MODEL'),
-              apiKey: config.get<string>('LLM_API_KEY') || undefined,
-            })
+            baseUrl: config.getOrThrow<string>('LLM_BASE_URL'),
+            model: config.getOrThrow<string>('LLM_MODEL'),
+            apiKey: config.get<string>('LLM_API_KEY') || undefined,
+          })
           : new ScriptedLlmClient(),
-    }, 
+    },
   ],
 })
-export class WorkerModule {}
+export class WorkerModule { }

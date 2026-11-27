@@ -17,4 +17,9 @@ export class RunsController {
     get(@Param('id', ParseUUIDPipe) id: string) {
         return this.runs.get(id);
     }
+    @Post(':id/cancel')
+    @HttpCode(202)
+    cancel(@Param('id', ParseUUIDPipe) id: string) {
+        return this.runs.cancel(id);
+    }
 }

@@ -87,7 +87,7 @@ export class RunStateRepository {
     attempt: number,
     status: RunStatus,
     patch: { result?: Record<string, unknown>; error?: string } = {},
-  ) {
+  ): Promise<void> {
     if (FENCING_DISABLED) {
       await this.ds.query(
         `UPDATE runs SET status = $2, result = $3::jsonb, error = $4, updated_at = now() WHERE id = $1::uuid`,
@@ -95,10 +95,21 @@ export class RunStateRepository {
       );
       return;
     }
-    const res = await this.ds
-      .getRepository(Run)
-      .update({ id: runId, attempt }, { status, result: patch.result as any ?? null, error: patch.error ?? null });
-    if (res.affected === 0) throw new FencedError(runId);
+    // Fenced, and only while the run is still 'running' (a cancel must not be overwritten).
+    const rows: { id: string }[] = await this.ds.query(
+      `WITH u AS (
+         UPDATE runs
+         SET status = $3, result = $4::jsonb, error = $5, updated_at = now()
+         WHERE id = $1::uuid AND attempt = $2::int AND status = 'running'
+         RETURNING id
+       )
+       SELECT id FROM u`,
+      [runId, attempt, status, json(patch.result), patch.error ?? null],
+    );
+    if (rows.length === 0) {
+      if ((await this.getStatus(runId)) === 'cancelled') return; // cancelled while we worked: not an ownership problem
+      throw new FencedError(runId);
+    }
   }
 
   /** true if this call created the row, false if it already existed */
