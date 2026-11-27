@@ -44,8 +44,7 @@ Redis handles delivery and scheduling. Postgres is the source of truth.
 
 ## Quickstart
 
-Requires Node 20+ and Docker.
-
+Requires Node 22.22.3 or newer and Docker. (Node 22.21.1 also works, with `npm install` engine warnings.)
 ```bash
 git clone https://github.com/MdIrfan-ul/agent-relay.git
 cd agent-relay
