@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { Client } from 'pg';
+import type { Readable } from 'node:stream';
 
 const API = process.env.CHAOS_API_URL ?? 'http://localhost:3000';
 const RUNS = Number(process.env.CHAOS_RUNS ?? 30);
@@ -12,6 +13,9 @@ const KILL_INTERVAL_MS = Number(process.env.CHAOS_KILL_INTERVAL_MS ?? 15_000);
 const TIMEOUT_MS = Number(process.env.CHAOS_TIMEOUT_MS ?? 10 * 60_000);
 const EXPECTED_STEPS = 7; // llm, tool, llm, tool, llm, tool, llm
 const EXPECTED_TOOL_CALLS = 3;
+const FREEZE_RATE = Number(process.env.CHAOS_FREEZE_RATE ?? 0);
+const FREEZE_MS = process.env.CHAOS_FREEZE_MS ?? '25000';
+
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -35,7 +39,12 @@ async function main() {
   let stopping = false;
   let workerDeaths = 0;
   let externalKills = 0;
+  let freezes = 0;
+  let resumes = 0;
+  let fencedRejections = 0;
   const children = new Set<ChildProcess>();
+  const fencedRuns = new Set<string>();
+
 
   const workerEnv = {
     ...process.env,
@@ -43,10 +52,38 @@ async function main() {
     SCRIPTED_LLM_DELAY_MS: process.env.CHAOS_LLM_DELAY_MS ?? '300',
     CHAOS_CRASH_RATE: CRASH_RATE,
     CHAOS_KILL_AFTER_STEP: '',
+    CHAOS_FREEZE_RATE: String(FREEZE_RATE),
+    CHAOS_FREEZE_MS: FREEZE_MS,
+  };
+
+  const watch = (stream: Readable | null) => {
+    let buf = '';
+    stream?.on('data', (chunk: Buffer) => {
+      buf += chunk.toString();
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+      for (const line of lines) {
+        if (line.includes('CHAOS: freezing worker')) freezes++;
+        else if (line.includes('CHAOS: resumed after freeze')) resumes++;
+        // else if (line.includes('lost ownership (fenced)')) {
+        //   fencedRejections++;
+        //   const m = line.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/);
+        //   if (m) fencedRuns.add(m[0]);
+        //   else if (fencedRejections <= 3) console.log('UNPARSED fenced line:', JSON.stringify(line));
+        // }
+        else if (line.includes('lost ownership (fenced)')) {
+          fencedRejections++;
+          const m = line.match(/run ([0-9a-f-]{36}): lost ownership/);
+          if (m) fencedRuns.add(m[1]);
+        }
+      }
+    });
   };
 
   const startWorker = () => {
-    const child = spawn(process.execPath, [WORKER_ENTRY], { env: workerEnv, stdio: 'ignore' });
+    const child = spawn(process.execPath, [WORKER_ENTRY], { env: workerEnv, stdio: ['ignore', 'pipe', 'pipe'] });
+    watch(child.stdout);
+    watch(child.stderr);
     children.add(child);
     child.on('exit', () => {
       children.delete(child);
@@ -55,15 +92,19 @@ async function main() {
       setTimeout(startWorker, 1000);
     });
   };
+
   for (let i = 0; i < WORKERS; i++) startWorker();
 
   // ---- external chaos: SIGKILL a random worker every so often ----
-  const killer = setInterval(() => {
-    const alive = [...children];
-    if (alive.length === 0) return;
-    alive[Math.floor(Math.random() * alive.length)].kill('SIGKILL');
-    externalKills++;
-  }, KILL_INTERVAL_MS);
+  const killer =
+    KILL_INTERVAL_MS > 0
+      ? setInterval(() => {
+        const alive = [...children];
+        if (alive.length === 0) return;
+        alive[Math.floor(Math.random() * alive.length)].kill('SIGKILL');
+        externalKills++;
+      }, KILL_INTERVAL_MS)
+      : undefined;
 
   // ---- submit runs through the real API ----
   const batch = Date.now();
@@ -100,6 +141,16 @@ async function main() {
     console.log(`  ${JSON.stringify(counts)}  worker deaths so far: ${workerDeaths}`);
     if (finished >= ids.length) break;
     await sleep(3000);
+  }
+  if (FREEZE_RATE > 0) {
+    const grace = Date.now() + 60_000;
+    while (resumes < freezes && Date.now() < grace) await sleep(1000);
+    await sleep(3000); // let late writes from resumed zombies land
+    const { rows } = await db.query(
+      `SELECT status, count(*)::int AS n FROM runs WHERE id = ANY($1::uuid[]) GROUP BY status`,
+      [ids],
+    );
+    counts = Object.fromEntries(rows.map((r) => [r.status as string, r.n as number]));
   }
 
   stopping = true;
@@ -174,11 +225,21 @@ async function main() {
     `SELECT coalesce(sum(executions - 1), 0)::int AS n FROM effects WHERE run_id = ANY($1::uuid[])`,
     [ids],
   );
+  if (FREEZE_RATE > 0) {
+    checks.push({
+      name: 'stale writes were rejected after takeover (fencing)',
+      ok: resumes === 0 || fencedRejections > 0,
+      detail: `${fencedRejections} rejected writes, ${resumes} zombies resumed`,
+    });
+  }
 
   console.log('\n=== CHAOS TEST RESULT ===');
   console.log(`runs: ${ids.length}   worker deaths: ${workerDeaths} (external SIGKILLs: ${externalKills}, rest in-process crashes)`);
   console.log(`runs resumed after a crash (attempt > 1): ${attempts.resumed}   max attempts on one run: ${attempts.max_attempt}`);
   console.log(`tool re-executions after a crash, absorbed by the idempotency key: ${reexec.n}`);
+  if (FREEZE_RATE > 0) {
+    console.log(`zombie workers: ${freezes} freezes, ${resumes} resumed; fenced log lines: ${fencedRejections}; distinct runs where a stale worker was fenced: ${fencedRuns.size}`);
+  }
   console.log('');
   for (const c of checks) console.log(`${c.ok ? 'PASS' : 'FAIL'}  ${c.name}  [${c.detail}]`);
 

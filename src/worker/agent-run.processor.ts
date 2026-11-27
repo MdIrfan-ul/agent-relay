@@ -2,11 +2,12 @@ import { Logger } from '@nestjs/common';
 import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Job } from 'bullmq';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { AgentService } from '../agent/agent.service';
 import { FencedError } from '../agent/errors';
 import { AGENT_RUNS_QUEUE } from '../queue/queue.constants';
 import { Run } from '../runs/run.entity';
+import type { RunStatus } from '../runs/run.entity';
 
 // Short lock and stall settings so crash recovery is quick in dev and in chaos tests.
 @Processor(AGENT_RUNS_QUEUE, { concurrency: 2, lockDuration: 10000, stalledInterval: 5000, maxStalledCount: 5 })
@@ -54,7 +55,16 @@ export class AgentRunProcessor extends WorkerHost {
   async onFailed(job: Job<{ runId: string }> | undefined, err: Error) {
     if (!job) return;
     if (job.attemptsMade >= (job.opts.attempts ?? 1)) {
-      await this.runs.update({ id: job.data.runId }, { status: 'dead', error: err.message });
+      // never overwrite a run that already reached a final state (e.g. finished by another worker)
+      await this.runs.update(
+        { id: job.data.runId, status: In<RunStatus>(['queued', 'running']) },
+        { status: 'dead', error: err.message },
+      );
     }
+  }
+
+  @OnWorkerEvent('error')
+  onError(err: Error) {
+    this.logger.warn(`worker error: ${err.message}`);
   }
 }

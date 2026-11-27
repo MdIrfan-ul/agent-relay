@@ -5,7 +5,7 @@ import { Run } from '../runs/run.entity';
 import { Step } from '../steps/step.entity';
 import { TOOLS } from '../tools/tools';
 import { RunStateRepository } from './run-state.repository';
-import { maybeCrash } from './chaos';
+import { maybeCrash, maybeFreeze } from './chaos';
 
 function pendingToolCalls(messages: Message[]): ToolCallRequest[] {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -25,7 +25,7 @@ export class AgentService {
   constructor(
     private readonly state: RunStateRepository,
     @Inject(LLM_CLIENT) private readonly llm: LlmClient,
-  ) {}
+  ) { }
 
   async run(runId: string, attempt: number): Promise<void> {
     const run = await this.state.getRun(runId);
@@ -67,6 +67,7 @@ export class AgentService {
       // 4. ask the LLM, then checkpoint the answer
       const started = Date.now();
       const resp = await this.llm.generate(messages, specs);
+      maybeFreeze('before_llm_save', stepIndex, attempt);
       tokensUsed = await this.state.saveStep(runId, attempt, {
         stepIndex,
         kind: 'llm_call',
@@ -82,7 +83,7 @@ export class AgentService {
     }
   }
 
-    private async runToolOnce(runId: string, attempt: number, stepIndex: number, call: ToolCallRequest): Promise<string> {
+  private async runToolOnce(runId: string, attempt: number, stepIndex: number, call: ToolCallRequest): Promise<string> {
     // Stable across attempts: built from ids, not from args (jsonb may reorder keys).
     const key = `${runId}:${stepIndex}:${call.id}`;
     const started = Date.now();
@@ -111,6 +112,7 @@ export class AgentService {
         out = { ok: false, error: e instanceof Error ? e.message : String(e) };
       }
       maybeCrash('tool_executed', stepIndex, attempt); // effect done, result not yet saved
+      maybeFreeze('tool_executed', stepIndex, attempt);
       content = JSON.stringify(out);
       await this.state.finishToolCall(key, { content });
     }
@@ -147,12 +149,12 @@ export class AgentService {
     }
     return messages;
   }
-//     /** Test hook: simulates a hard crash right after a step is saved. Fires only on the first attempt. */
-//   private maybeCrash(stepIndex: number, attempt: number): void {
-//     const target = process.env.CHAOS_KILL_AFTER_STEP;
-//     if (target !== undefined && target !== '' && attempt === 1 && stepIndex === Number(target)) {
-//       this.logger.error(`CHAOS: killing worker after step ${stepIndex}`);
-//       process.kill(process.pid, 'SIGKILL'); // abrupt: no graceful shutdown, no lock release
-//     }
-//   }
+  //     /** Test hook: simulates a hard crash right after a step is saved. Fires only on the first attempt. */
+  //   private maybeCrash(stepIndex: number, attempt: number): void {
+  //     const target = process.env.CHAOS_KILL_AFTER_STEP;
+  //     if (target !== undefined && target !== '' && attempt === 1 && stepIndex === Number(target)) {
+  //       this.logger.error(`CHAOS: killing worker after step ${stepIndex}`);
+  //       process.kill(process.pid, 'SIGKILL'); // abrupt: no graceful shutdown, no lock release
+  //     }
+  //   }
 }

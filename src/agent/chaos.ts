@@ -23,3 +23,18 @@ export function maybeCrash(point: ChaosPoint, stepIndex: number, attempt: number
     process.kill(process.pid, 'SIGKILL');
   }
 }
+
+export type FreezePoint = 'before_llm_save' | 'tool_executed';
+
+/**
+ * Test hook: blocks the whole event loop so this worker's job lock expires, simulating a "zombie".
+ * Only the first attempt of a run freezes, so every run can finish.
+ */
+export function maybeFreeze(point: FreezePoint, stepIndex: number, attempt: number): void {
+  const rate = Number(process.env.CHAOS_FREEZE_RATE ?? 0);
+  if (attempt !== 1 || !(Math.random() < rate)) return;
+  const ms = Number(process.env.CHAOS_FREEZE_MS ?? 25_000);
+  console.error(`CHAOS: freezing worker for ${ms}ms at ${point} (step ${stepIndex}, attempt ${attempt})`);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  console.error(`CHAOS: resumed after freeze at ${point} (step ${stepIndex})`);
+}
