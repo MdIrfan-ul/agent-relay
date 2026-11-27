@@ -24,6 +24,9 @@ are applied once as long as tools honor the idempotency key.
 with zero duplicate side effects and exact token accounting. A control run without idempotency
 keys duplicated side effects in 15% of runs under the same conditions.
 
+- **Cancel**: `POST /runs/:id/cancel` stops a run cooperatively at its next loop iteration
+- **Reconciler**: workers re-enqueue `queued` runs that have no live job (for example, the API died after the insert)
+
 ## Stack
 
 NestJS · TypeScript · BullMQ (Redis) · PostgreSQL · TypeORM
@@ -41,6 +44,8 @@ NestJS · TypeScript · BullMQ (Redis) · PostgreSQL · TypeORM
    loop continues from the last saved step.
 
 Redis handles delivery and scheduling. Postgres is the source of truth.
+6. Every worker also runs a reconciler that periodically finds `queued` runs older than a grace
+   period with no live job and re-enqueues them. Enqueueing is idempotent (job id = run id).
 
 ## Quickstart
 
@@ -82,6 +87,14 @@ Optional knobs: `CHAOS_RUNS`, `CHAOS_WORKERS`, `CHAOS_CRASH_RATE`, `CHAOS_KILL_I
 a leftover setting can't silently change a run. The two control experiments are described
 below.
 
+## API
+
+| Method and path | Purpose |
+|---|---|
+| `POST /runs` | Create a run. Body: `agent`, `input` (use `input.task` as the prompt), optional `maxSteps`, `tokenBudget`. Optional `Idempotency-Key` header. Returns `202` |
+| `GET /runs/:id` | Status, attempt, tokens used, result or error |
+| `POST /runs/:id/cancel` | Cancel a `queued` or `running` run. `409` if it already finished |
+
 ## Configuration
 
 | Variable | Purpose |
@@ -96,6 +109,8 @@ below.
 | `CHAOS_FREEZE_RATE`, `CHAOS_FREEZE_MS` | Zombie mode: chance that a first attempt freezes, and for how long (ms) |
 | `CHAOS_NAIVE_EFFECTS` | Control experiment only: the tool ignores its idempotency key (command line only) |
 | `CHAOS_DISABLE_FENCING` | Control experiment only: removes the ownership check (command line only) |
+| `RECONCILER_INTERVAL_MS`, `RECONCILER_GRACE_MS` | How often the reconciler runs, and how old a `queued` run must be before it is re-enqueued (default 30000 each) |
+| `CHAOS_API_CRASH_AFTER_INSERT` | Test hook: the API kills itself after saving a run and before enqueueing it (command line only) |
 
 ## Crash-recovery demo
 
@@ -132,7 +147,12 @@ Result of this test with the scripted LLM:
 
 - If a worker dies after a tool runs but before its result is saved, the tool runs again.
   Tools that touch the outside world should pass the idempotency key downstream.
-- If the API crashes between the database insert and the enqueue, the run stays `queued`.
+- If the API crashes between the database insert and the enqueue, the run stays `queued` until
+  a worker's reconciler re-enqueues it (default: within about a minute). The reconciler only
+  repairs `queued` runs. A `running` run whose job disappeared from Redis is not recovered.
+- Cancel is cooperative: a worker in the middle of a step finishes that step (an LLM call or a
+  tool call) before it notices, so a cancelled run can still spend tokens or run one more tool.
+- The cancel and reconciler paths were verified by hand, not by the automated chaos suite.
   A reconciler for this is on the roadmap.
 - Tokens for an LLM call whose answer was lost in a crash are not counted, so `tokens_used`
   can undercount real spend.
@@ -145,8 +165,9 @@ Result of this test with the scripted LLM:
 - [x] Idempotent tool calls and fenced writes
 - [x] Automated chaos test suite (random worker kills, verify exactly-once side effects)
 - [x] Zombie-worker test (event-loop freeze past lock expiry), with a fencing-disabled control
+- [x] Cancel endpoint and reconciler for orphaned queued runs
 - [ ] Retries and dead-letter handling (implemented, not yet tested)
-- [ ] Cancel endpoint, reconciler, resource locks
+- [ ] Resource locks
 - [ ] Observability: per-run trace, cost tracking
 - [ ] Demo agent using a real model, and deployment
 
