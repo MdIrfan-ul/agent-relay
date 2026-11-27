@@ -1,7 +1,8 @@
 // src/runs/runs.controller.ts
-import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { CreateRunDto } from './dto/create-run.dto';
 import { RunsService } from './runs.service';
+import { ListRunsDto } from './dto/list-runs.dto';
 
 @Controller('runs')
 export class RunsController {
@@ -21,5 +22,15 @@ export class RunsController {
     @HttpCode(202)
     cancel(@Param('id', ParseUUIDPipe) id: string) {
         return this.runs.cancel(id);
+    }
+
+    @Get()
+    list(@Query() query: ListRunsDto) {
+        return this.runs.list(query);
+    }
+
+    @Get(':id/steps')
+    steps(@Param('id', ParseUUIDPipe) id: string) {
+        return this.runs.steps(id);
     }
 }

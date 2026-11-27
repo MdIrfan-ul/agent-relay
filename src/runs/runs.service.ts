@@ -2,17 +2,20 @@ import { ConflictException, Injectable, NotFoundException } from '@nestjs/common
 import { InjectQueue } from '@nestjs/bullmq';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Queue } from 'bullmq';
-import { Repository } from 'typeorm';
+import { FindOptionsWhere, Repository } from 'typeorm';
 import { maybeCrashApiAfterInsert } from '../agent/chaos';
 import { enqueueRun } from '../queue/enqueue';
 import { AGENT_RUNS_QUEUE } from '../queue/queue.constants';
 import { CreateRunDto } from './dto/create-run.dto';
 import { Run } from './run.entity';
+import { Step } from '../steps/step.entity';
+import { ListRunsDto } from './dto/list-runs.dto';
 
 @Injectable()
 export class RunsService {
   constructor(
     @InjectRepository(Run) private readonly runs: Repository<Run>,
+    @InjectRepository(Step) private readonly stepRepo: Repository<Step>,
     @InjectQueue(AGENT_RUNS_QUEUE) private readonly queue: Queue,
   ) { }
 
@@ -66,5 +69,54 @@ export class RunsService {
     if (!run) throw new NotFoundException('run not found');
     if (rows.length === 0) throw new ConflictException(`run is already ${run.status}`);
     return { id: run.id, status: run.status };
+  }
+  async list(q: ListRunsDto) {
+    const where: FindOptionsWhere<Run> = {};
+    if (q.status) where.status = q.status;
+    if (q.agent) where.agentName = q.agent;
+
+    const [items, total] = await this.runs.findAndCount({
+      select: {
+        id: true,
+        agentName: true,
+        status: true,
+        attempt: true,
+        tokensUsed: true,
+        error: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+      where,
+      order: { createdAt: 'DESC' },
+      take: q.limit,
+      skip: q.offset,
+    });
+    return { total, limit: q.limit, offset: q.offset, items };
+  }
+
+  /** The trace of a run: every saved step with latency and tokens. */
+  async steps(id: string) {
+    const run = await this.runs.findOne({
+      where: { id },
+      select: { id: true, status: true, attempt: true, tokensUsed: true },
+    });
+    if (!run) throw new NotFoundException('run not found');
+
+    const steps = await this.stepRepo.find({
+      where: { runId: id },
+      order: { stepIndex: 'ASC' },
+      select: {
+        stepIndex: true,
+        kind: true,
+        status: true,
+        tokensIn: true,
+        tokensOut: true,
+        latencyMs: true,
+        request: true,
+        response: true,
+        createdAt: true,
+      },
+    });
+    return { runId: run.id, status: run.status, attempt: run.attempt, tokensUsed: run.tokensUsed, steps };
   }
 }

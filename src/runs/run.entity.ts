@@ -1,6 +1,7 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
-export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'dead';
+export const RUN_STATUSES = ['queued', 'running', 'succeeded', 'failed', 'cancelled', 'dead'] as const;
+export type RunStatus = (typeof RUN_STATUSES)[number];
 
 @Entity('runs')
 @Index(['status', 'createdAt'])

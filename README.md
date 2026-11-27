@@ -94,6 +94,8 @@ below.
 | `POST /runs` | Create a run. Body: `agent`, `input` (use `input.task` as the prompt), optional `maxSteps`, `tokenBudget`. Optional `Idempotency-Key` header. Returns `202` |
 | `GET /runs/:id` | Status, attempt, tokens used, result or error |
 | `POST /runs/:id/cancel` | Cancel a `queued` or `running` run. `409` if it already finished |
+| `GET /runs` | List runs, newest first. Query: `status`, `agent`, `limit` (1-100, default 20), `offset`. Returns `total` and `items` |
+| `GET /runs/:id/steps` | The run's trace: every saved step with kind, latency, token counts, and request and response |
 
 ## Configuration
 

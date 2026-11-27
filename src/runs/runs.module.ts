@@ -6,9 +6,10 @@ import { AGENT_RUNS_QUEUE } from '../queue/queue.constants';
 import { Run } from './run.entity';
 import { RunsController } from './runs.controller';
 import { RunsService } from './runs.service';
+import { Step } from '../steps/step.entity';
 
 @Module({
-    imports: [TypeOrmModule.forFeature([Run]), BullModule.registerQueue({ name: AGENT_RUNS_QUEUE })],
+    imports: [TypeOrmModule.forFeature([Run, Step]), BullModule.registerQueue({ name: AGENT_RUNS_QUEUE })],
     controllers: [RunsController],
     providers: [RunsService],
 })
