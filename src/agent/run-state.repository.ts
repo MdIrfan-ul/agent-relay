@@ -27,10 +27,18 @@ SELECT $1::uuid, $2::int, $3::text, $4::jsonb, $5::jsonb, $6::int, $7::int, $8::
 WHERE EXISTS (SELECT 1 FROM runs WHERE id = $1::uuid AND attempt = $9::int)
 ON CONFLICT (run_id, step_index) DO NOTHING
 RETURNING id`;
+// CONTROL EXPERIMENT ONLY: set CHAOS_DISABLE_FENCING=1 on the command line to remove ownership checks.
+const FENCING_DISABLED = process.env.CHAOS_DISABLE_FENCING === '1';
+
+const INSERT_STEP_UNFENCED_SQL = `
+INSERT INTO steps (run_id, step_index, kind, request, response, tokens_in, tokens_out, latency_ms, status)
+VALUES ($1::uuid, $2::int, $3::text, $4::jsonb, $5::jsonb, $6::int, $7::int, $8::int, 'done')
+ON CONFLICT (run_id, step_index) DO NOTHING
+RETURNING id`;
 
 @Injectable()
 export class RunStateRepository {
-  constructor(private readonly ds: DataSource) {}
+  constructor(private readonly ds: DataSource) { }
 
   getRun(id: string) {
     return this.ds.getRepository(Run).findOneBy({ id });
@@ -46,6 +54,7 @@ export class RunStateRepository {
 
   /** Saves a step and adds its tokens to the run, atomically. Returns the run's new tokens_used. */
   saveStep(runId: string, attempt: number, s: NewStep): Promise<number> {
+    if (FENCING_DISABLED) return this.saveStepUnfenced(runId, s);
     return this.ds.transaction(async (em) => {
       const inserted = await em.query(INSERT_STEP_SQL, [
         runId,
@@ -79,6 +88,13 @@ export class RunStateRepository {
     status: RunStatus,
     patch: { result?: Record<string, unknown>; error?: string } = {},
   ) {
+    if (FENCING_DISABLED) {
+      await this.ds.query(
+        `UPDATE runs SET status = $2, result = $3::jsonb, error = $4, updated_at = now() WHERE id = $1::uuid`,
+        [runId, status, json(patch.result), patch.error ?? null],
+      );
+      return;
+    }
     const res = await this.ds
       .getRepository(Run)
       .update({ id: runId, attempt }, { status, result: patch.result as any ?? null, error: patch.error ?? null });
@@ -91,7 +107,7 @@ export class RunStateRepository {
       .createQueryBuilder()
       .insert()
       .into(ToolCall)
-      .values({ idempotencyKey: key, runId, toolName, args:args as any, status: 'started' })
+      .values({ idempotencyKey: key, runId, toolName, args: args as any, status: 'started' })
       .orIgnore()
       .returning('idempotency_key')
       .execute();
@@ -103,10 +119,10 @@ export class RunStateRepository {
   }
 
   async finishToolCall(key: string, result: ToolResultPayload) {
-    await this.ds.getRepository(ToolCall).update({ idempotencyKey: key }, { status: 'done', result  });
+    await this.ds.getRepository(ToolCall).update({ idempotencyKey: key }, { status: 'done', result });
   }
-    /** The side effect. One row per key; a re-run after a crash bumps `executions` instead of adding a row. */
-    /** The side effect. One row per key; a re-run after a crash bumps `executions` instead of adding a row. */
+  /** The side effect. One row per key; a re-run after a crash bumps `executions` instead of adding a row. */
+  /** The side effect. One row per key; a re-run after a crash bumps `executions` instead of adding a row. */
   async recordEffect(key: string, runId: string, label: string): Promise<void> {
     if (process.env.CHAOS_NAIVE_EFFECTS === '1') {
       // Control experiment only: ignores the idempotency key, like a tool with no downstream dedupe.
@@ -122,5 +138,27 @@ export class RunStateRepository {
        ON CONFLICT (idempotency_key) DO UPDATE SET executions = effects.executions + 1`,
       [key, runId, label],
     );
+  }
+  /** CONTROL EXPERIMENT ONLY: no ownership check, and a duplicate step is silently ignored. */
+  private saveStepUnfenced(runId: string, s: NewStep): Promise<number> {
+    return this.ds.transaction(async (em) => {
+      await em.query(INSERT_STEP_UNFENCED_SQL, [
+        runId,
+        s.stepIndex,
+        s.kind,
+        json(s.request),
+        json(s.response),
+        s.tokensIn ?? null,
+        s.tokensOut ?? null,
+        s.latencyMs ?? null,
+      ]);
+      const tokens = Math.trunc((s.tokensIn ?? 0) + (s.tokensOut ?? 0));
+      const rows: { tokens_used: number }[] = await em.query(
+        `WITH u AS (UPDATE runs SET tokens_used = tokens_used + $2::int WHERE id = $1::uuid RETURNING tokens_used)
+         SELECT tokens_used FROM u`,
+        [runId, tokens],
+      );
+      return Number(rows[0].tokens_used);
+    });
   }
 }

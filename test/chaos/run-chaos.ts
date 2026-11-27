@@ -127,6 +127,7 @@ async function main() {
     throw new Error(`could not submit runs (is the API running on ${API}?): ${String(e)}`);
   }
   console.log(`submitted ${ids.length} runs; ${WORKERS} workers; crash rate ${CRASH_RATE} per point`);
+  console.log(`MODE: ${process.env.CHAOS_NAIVE_EFFECTS === '1' ? 'naive effects (control)' : 'idempotent effects'}; fencing ${process.env.CHAOS_DISABLE_FENCING === '1' ? 'DISABLED (control)' : 'on'}; freeze rate ${FREEZE_RATE}`);
 
   // ---- wait for every run to reach a final state ----
   const deadline = Date.now() + TIMEOUT_MS;
