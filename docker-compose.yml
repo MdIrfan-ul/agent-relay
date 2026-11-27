@@ -1,3 +1,17 @@
+x-app: &app
+  build: .
+  image: agent-relay-app
+  profiles: ["app"]
+  environment:
+    DATABASE_URL: postgres://relay:relay@postgres:5432/relay
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    LLM_PROVIDER: ${LLM_PROVIDER:-scripted}
+    LLM_BASE_URL: ${LLM_BASE_URL:-https://api.groq.com/openai/v1}
+    LLM_MODEL: ${LLM_MODEL:-}
+    LLM_API_KEY: ${LLM_API_KEY:-}
+    SCRIPTED_LLM_DELAY_MS: ${SCRIPTED_LLM_DELAY_MS:-500}
+
 services:
   postgres:
     image: postgres:16
@@ -8,6 +22,11 @@ services:
     ports: ["5432:5432"]
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U relay -d relay"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
   redis:
     image: redis:7
@@ -15,6 +34,41 @@ services:
     ports: ["6379:6379"]
     volumes:
       - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    <<: *app
+    command: ["npm", "run", "migration:run"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    command: ["node", "dist/main.js"]
+    ports: ["3000:3000"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  worker:
+    <<: *app
+    command: ["node", "dist/worker.js"]
+    deploy:
+      replicas: 3
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
 volumes:
   pgdata:

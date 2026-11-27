@@ -74,6 +74,31 @@ curl http://localhost:3000/runs/<id>
 With the default scripted LLM the task text is ignored. Set `LLM_PROVIDER=openai-compat`
 (see Configuration) to use a real model.
 
+### Run everything in Docker
+
+```bash
+cp .env.example .env
+docker compose --profile app up --build -d
+```
+
+This starts Postgres, Redis, a one-shot migration, the API on port 3000, and three workers
+(scripted LLM by default). Submit a run with the curl above.
+
+To watch crash recovery, slow the scripted LLM and hard-kill the workers mid-run:
+
+```bash
+SCRIPTED_LLM_DELAY_MS=3000 docker compose --profile app up -d
+curl -s -X POST http://localhost:3000/runs -H "Content-Type: application/json" \
+  -d '{"agent":"demo","input":{"task":"kill demo [effect]"}}'
+sleep 8 && docker kill $(docker ps -q --filter "name=worker")
+curl -s http://localhost:3000/runs/<id>/steps    # after ~40 seconds
+```
+
+Docker restarts the killed workers, BullMQ notices the dead locks, and the run finishes from its
+last saved step (`attempt` 2 or more, no gaps in the steps).
+
+The Compose file is for local demos: it publishes the database ports and uses a fixed
+password.
 ### Run the chaos suite
 
 Keep the API running (`npm run start:dev`), stop any other workers, then:
