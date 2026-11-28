@@ -78,22 +78,31 @@ With the default scripted LLM the task text is ignored. Set `LLM_PROVIDER=openai
 
 ```bash
 cp .env.example .env
-docker compose --profile app up --build -d
+SCRIPTED_LLM_DELAY_MS=3000 LLM_PROVIDER=scripted docker compose --profile app up   -d     # start the workers again
 ```
+Repeat the `LLM_PROVIDER` and `SCRIPTED_LLM_DELAY_MS` settings on every `up -d`, because Compose
+recreates the containers with whatever values are in your shell or `.env` at that moment.
 
 This starts Postgres, Redis, a one-shot migration, the API on port 3000, and three workers
 (scripted LLM by default). Submit a run with the curl above.
 
-To watch crash recovery, slow the scripted LLM and hard-kill the workers mid-run:
+To watch crash recovery, slow the scripted LLM, hard-kill the workers mid-run, and start them again:
 
 ```bash
-SCRIPTED_LLM_DELAY_MS=3000 docker compose --profile app up -d
-curl -s -X POST http://localhost:3000/runs -H "Content-Type: application/json" \
-  -d '{"agent":"demo","input":{"task":"kill demo [effect]"}}'
-sleep 8 && docker kill $(docker ps -q --filter "name=worker")
-curl -s http://localhost:3000/runs/<id>/steps    # after ~40 seconds
+SCRIPTED_LLM_DELAY_MS=3000 LLM_PROVIDER=scripted docker compose --profile app up -d
+RUN_ID=$(curl -s -X POST http://localhost:3000/runs -H "Content-Type: application/json" \
+  -d '{"agent":"demo","input":{"task":"kill demo [effect]"}}' | grep -o '"id":"[^"]*"' | cut -d'"' -f4)
+sleep 8
+docker kill $(docker ps -q --filter "label=com.docker.compose.service=worker")
+docker compose --profile app up -d     # start the workers again
+sleep 40
+curl -s http://localhost:3000/runs/$RUN_ID/steps
 ```
 
+After the restart, BullMQ notices the dead locks (about 10 to 20 seconds), another attempt picks up
+the run, and it finishes from its last saved step (`attempt` 2 or more, no gaps in the steps).
+Workers killed with `docker kill` are not restarted automatically in the setup I tested, so
+the second `up -d` plays the role of an orchestrator.
 Docker restarts the killed workers, BullMQ notices the dead locks, and the run finishes from its
 last saved step (`attempt` 2 or more, no gaps in the steps).
 
